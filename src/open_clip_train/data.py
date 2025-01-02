@@ -431,7 +431,7 @@ def get_wds_dataset(
     tokenizer_apply = lambda text: tokenizer(text["description"])[0]
     pipeline.extend(
         [
-            wds.select(filter_no_caption_or_no_image),
+            # wds.select(filter_no_caption_or_no_image),
             wds.decode("pilrgb", handler=log_and_continue),
             wds.rename(image="jpg;png;jpeg;webp", text="json"),
             wds.map_dict(image=preprocess_img, text=tokenizer_apply),
