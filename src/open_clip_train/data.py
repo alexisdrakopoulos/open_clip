@@ -187,10 +187,8 @@ def count_samples(dataloader):
 
 
 def filter_no_caption_or_no_image(sample):
-    has_caption = "txt" in sample
-    has_image = (
-        "png" in sample or "jpg" in sample or "jpeg" in sample or "webp" in sample
-    )
+    has_caption = "json" in sample
+    has_image = "image" in sample
     return has_caption and has_image
 
 
@@ -431,9 +429,9 @@ def get_wds_dataset(
     tokenizer_apply = lambda text: tokenizer(text["description"])[0]
     pipeline.extend(
         [
-            # wds.select(filter_no_caption_or_no_image),
+            wds.select(filter_no_caption_or_no_image),
             wds.decode("pilrgb", handler=log_and_continue),
-            wds.rename(image="jpg;png;jpeg;webp", text="json"),
+            wds.rename(text="json"),
             wds.map_dict(image=preprocess_img, text=tokenizer_apply),
             wds.to_tuple("image", "text"),
             wds.batched(args.batch_size, partial=not is_train),
