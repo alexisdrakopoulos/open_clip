@@ -105,10 +105,6 @@ def train_one_epoch(
             scheduler(step)
 
         images, texts = batch
-        print(len(texts))
-        print(type(images[0]))
-        print(len(texts))
-        raise ValueError(texts[0])
         images = images.to(device=device, dtype=input_dtype, non_blocking=True)
         texts = texts.to(device=device, non_blocking=True)
 
