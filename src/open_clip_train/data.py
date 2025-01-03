@@ -430,8 +430,9 @@ def get_wds_dataset(
     pipeline.extend(
         [
             wds.select(filter_no_caption_or_no_image),
+            wds.rename(jpg="image"),
             wds.decode("pilrgb", handler=log_and_continue),
-            wds.rename(text="json"),
+            wds.rename(image="jpg", text="json"),
             wds.map_dict(image=preprocess_img, text=tokenizer_apply),
             wds.to_tuple("image", "text"),
             wds.batched(args.batch_size, partial=not is_train),
