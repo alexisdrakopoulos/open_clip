@@ -299,6 +299,10 @@ _VITL14 = dict(
         hf_hub='apple/DFN2B-CLIP-ViT-L-14/',
         quick_gelu=True,
     ),
+    # DFN-2B 39B SS
+    dfn2b_s39b=_pcfg(
+        hf_hub='apple/DFN2B-CLIP-ViT-L-14-39B/',
+    ),
 )
 
 _VITL14_336 = dict(
@@ -504,6 +508,52 @@ _PRETRAINED = {
     ),
     "ViT-SO400M-14-SigLIP-384": dict(
         webli=_slpcfg(hf_hub='timm/ViT-SO400M-14-SigLIP-384/'),
+    ),
+
+    "ViT-B-32-SigLIP2-256": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-B-32-SigLIP2-256/'),
+    ),
+    "ViT-B-16-SigLIP2": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-B-16-SigLIP2/'),
+    ),
+    "ViT-B-16-SigLIP2-256": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-B-16-SigLIP2-256/'),
+    ),
+    "ViT-B-16-SigLIP2-384": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-B-16-SigLIP2-384/'),
+    ),
+    "ViT-B-16-SigLIP2-512": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-B-16-SigLIP2-512/'),
+    ),
+    "ViT-L-16-SigLIP2-256": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-L-16-SigLIP2-256/'),
+    ),
+    "ViT-L-16-SigLIP2-384": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-L-16-SigLIP2-384/'),
+    ),
+    "ViT-L-16-SigLIP2-512": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-L-16-SigLIP2-512/'),
+    ),
+    "ViT-SO400M-14-SigLIP2": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-SO400M-14-SigLIP2/'),
+    ),
+    "ViT-SO400M-14-SigLIP2-378": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-SO400M-14-SigLIP2-378/'),
+    ),
+    "ViT-SO400M-16-SigLIP2-256": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-SO400M-16-SigLIP2-256/'),
+    ),
+    "ViT-SO400M-16-SigLIP2-384": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-SO400M-16-SigLIP2-384/'),
+    ),
+    "ViT-SO400M-16-SigLIP2-512": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-SO400M-16-SigLIP2-512/'),
+    ),
+    "ViT-gopt-16-SigLIP2-256": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-gopt-16-SigLIP2-256/'),
+    ),
+    "ViT-gopt-16-SigLIP2-384": dict(
+        webli=_slpcfg(hf_hub='timm/ViT-gopt-16-SigLIP2-384/'),
     ),
 
     "ViT-L-14-CLIPA": dict(
@@ -768,6 +818,9 @@ def download_pretrained(
     target = ''
     if not cfg:
         return target
+
+    if 'file' in cfg:
+        return cfg['file']
 
     has_hub = has_hf_hub()
     download_url = cfg.get('url', '')
