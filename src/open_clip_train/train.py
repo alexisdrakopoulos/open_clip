@@ -3,7 +3,7 @@ import logging
 import math
 import os
 import time
-import tqdm
+from tqdm import tqdm
 
 import numpy as np
 import torch
