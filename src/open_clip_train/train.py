@@ -74,6 +74,9 @@ def train_one_epoch(
     args,
     tb_writer=None,
 ):
+    # run evaluation
+    run_image_retrieval_evaluation(model, data, epoch, args)
+
     device = torch.device(args.device)
     autocast = get_autocast(args.precision, device_type=device.type)
     input_dtype = get_input_dtype(args.precision)
