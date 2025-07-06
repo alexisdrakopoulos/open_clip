@@ -63,7 +63,7 @@ def calculate_recall_at_k(retrieved_items, ground_truth_items, k):
 # --- Main Evaluation Function for OpenCLIP ---
 
 
-def run_image_retrieval_evaluation(model, data, epoch, args):
+def run_image_retrieval_evaluation(model, transform, epoch, args):
     """
     Runs a full image retrieval evaluation benchmark for an OpenCLIP model.
     """
@@ -92,7 +92,7 @@ def run_image_retrieval_evaluation(model, data, epoch, args):
 
     # --- 2. Setup Dataset and Dataloader ---
     # Use the model's validation transform for consistency
-    eval_transform = data["val"].dataset.transform
+    eval_transform = transform
 
     dataset = ImageDataset(all_paths, eval_transform, root_path=data_root)
     dataloader = DataLoader(

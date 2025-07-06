@@ -72,10 +72,21 @@ def train_one_epoch(
     scheduler,
     dist_model,
     args,
+    eval_transform=None,
     tb_writer=None,
 ):
     # run evaluation
-    run_image_retrieval_evaluation(model, data, epoch, args)
+    if eval_transform is not None:
+        # Pass the transform object directly, not the whole 'data' dict
+        retrieval_metrics = run_image_retrieval_evaluation(
+            model, eval_transform, epoch, args
+        )
+        # You can now log these metrics if you want
+        if is_master(args) and retrieval_metrics:
+            log_data = {"epoch": epoch}
+            log_data.update({f"val/{k}": v for k, v in retrieval_metrics.items()})
+            if args.wandb:
+                wandb.log(log_data)
 
     device = torch.device(args.device)
     autocast = get_autocast(args.precision, device_type=device.type)
