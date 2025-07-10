@@ -98,7 +98,7 @@ def run_image_retrieval_evaluation(model, transform, epoch, args):
         dataset,
         batch_size=args.retrieval_batch_size,
         shuffle=False,
-        num_workers=args.workers,
+        num_workers=args.workers * 4,
         pin_memory=True,
     )
 
