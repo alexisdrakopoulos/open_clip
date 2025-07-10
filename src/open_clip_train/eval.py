@@ -8,7 +8,6 @@ from PIL import Image
 from tqdm import tqdm
 import faiss
 from torch.utils.data import Dataset, DataLoader
-
 from open_clip_train.distributed import is_master
 
 
@@ -94,12 +93,16 @@ def run_image_retrieval_evaluation(model, transform, epoch, args):
     # Use the model's validation transform for consistency
     eval_transform = transform
 
+    # get number of GPUs
+    num_gpus = torch.cuda.device_count()
+    num_workers = args.workers * num_gpus
+
     dataset = ImageDataset(all_paths, eval_transform, root_path=data_root)
     dataloader = DataLoader(
         dataset,
         batch_size=args.retrieval_batch_size,
         shuffle=False,
-        num_workers=args.workers,
+        num_workers=num_workers,
         pin_memory=True,
     )
 
