@@ -349,6 +349,17 @@ class ResampledShards2(IterableDataset):
                 )
 
 
+def select_caption_for_training(data: dict) -> str:
+    """This method exists to augment the training procedure / captioning process by selecting
+    a random caption if more than 1 is available in the data dictionary."""
+    if "text" in data:
+        return random.choice(data["text"])
+    elif "description" in data:
+        return data["description"]
+
+    raise ValueError("Data does not contain valid text for training.")
+
+
 def get_wds_dataset(
     args, preprocess_img, is_train, epoch=0, floor=False, tokenizer=None
 ):
@@ -432,7 +443,7 @@ def get_wds_dataset(
             wds.rename(image="image.jpg", text="data.json"),
             wds.map_dict(
                 image=preprocess_img,
-                text=lambda text: tokenizer(text["description"])[0],
+                text=lambda text: tokenizer(select_caption_for_training(text))[0],
             ),
             wds.to_tuple("image", "text"),
             wds.batched(args.batch_size, partial=not is_train),
