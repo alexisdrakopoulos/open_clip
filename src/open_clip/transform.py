@@ -399,24 +399,20 @@ def image_transform(
                 train_transform.extend(
                     [color_jitter(*aug_cfg.color_jitter, p=aug_cfg.color_jitter_prob)]
                 )
-                if aug_cfg.random_perspective:
-                    train_transform.append(
-                        RandomPerspective(distortion_scale=0.2, p=0.2)
+            if aug_cfg.random_perspective:
+                train_transform.append(RandomPerspective(distortion_scale=0.2, p=0.2))
+            if aug_cfg.random_autocontrast_prob is not None:
+                train_transform.append(
+                    RandomAutocontrast(p=aug_cfg.random_autocontrast_prob)
+                )
+            if aug_cfg.random_equalize_prob is not None:
+                train_transform.append(RandomEqualize(p=aug_cfg.random_equalize_prob))
+            if aug_cfg.random_sharpness_prob is not None:
+                train_transform.append(
+                    RandomAdjustSharpness(
+                        sharpness_factor=2, p=aug_cfg.random_sharpness_prob
                     )
-                if aug_cfg.random_autocontrast_prob is not None:
-                    train_transform.append(
-                        RandomAutocontrast(p=aug_cfg.random_autocontrast_prob)
-                    )
-                if aug_cfg.random_equalize_prob is not None:
-                    train_transform.append(
-                        RandomEqualize(p=aug_cfg.random_equalize_prob)
-                    )
-                if aug_cfg.random_sharpness_prob is not None:
-                    train_transform.append(
-                        RandomAdjustSharpness(
-                            sharpness_factor=2, p=aug_cfg.random_sharpness_prob
-                        )
-                    )
+                )
             if aug_cfg.gray_scale_prob:
                 train_transform.extend([gray_scale(aug_cfg.gray_scale_prob)])
             train_transform.extend(
