@@ -367,6 +367,10 @@ def image_transform(
             # drop extra non-timm items
             aug_cfg_dict.pop("color_jitter_prob", None)
             aug_cfg_dict.pop("gray_scale_prob", None)
+            aug_cfg_dict.pop("random_perspective", None)
+            aug_cfg_dict.pop("random_autocontrast_prob", None)
+            aug_cfg_dict.pop("random_equalize_prob", None)
+            aug_cfg_dict.pop("random_sharpness_prob", None)
 
             train_transform = create_transform(
                 input_size=input_size,
