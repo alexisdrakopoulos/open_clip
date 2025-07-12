@@ -415,6 +415,7 @@ def image_transform(
                 )
             if aug_cfg.gray_scale_prob:
                 train_transform.extend([gray_scale(aug_cfg.gray_scale_prob)])
+
             train_transform.extend(
                 [
                     ToTensor(),
