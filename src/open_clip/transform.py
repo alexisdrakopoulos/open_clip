@@ -6,8 +6,22 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 import torchvision.transforms.functional as F
-from torchvision.transforms import Normalize, Compose, RandomResizedCrop, InterpolationMode, ToTensor, Resize, \
-    CenterCrop, ColorJitter, Grayscale
+from torchvision.transforms import (
+    Normalize,
+    Compose,
+    RandomResizedCrop,
+    InterpolationMode,
+    ToTensor,
+    Resize,
+    CenterCrop,
+    ColorJitter,
+    Grayscale,
+    RandomHorizontalFlip,
+    RandomPerspective,
+    RandomAutocontrast,
+    RandomEqualize,
+    RandomAdjustSharpness,
+)
 
 from .constants import OPENAI_DATASET_MEAN, OPENAI_DATASET_STD
 from .utils import to_2tuple
@@ -16,15 +30,15 @@ from .utils import to_2tuple
 @dataclass
 class PreprocessCfg:
     size: Union[int, Tuple[int, int]] = 224
-    mode: str = 'RGB'
+    mode: str = "RGB"
     mean: Tuple[float, ...] = OPENAI_DATASET_MEAN
     std: Tuple[float, ...] = OPENAI_DATASET_STD
-    interpolation: str = 'bicubic'
-    resize_mode: str = 'shortest'
+    interpolation: str = "bicubic"
+    resize_mode: str = "shortest"
     fill_color: int = 0
 
     def __post_init__(self):
-        assert self.mode in ('RGB',)
+        assert self.mode in ("RGB",)
 
     @property
     def num_channels(self):
@@ -34,14 +48,15 @@ class PreprocessCfg:
     def input_size(self):
         return (self.num_channels,) + to_2tuple(self.size)
 
+
 _PREPROCESS_KEYS = set(asdict(PreprocessCfg()).keys())
 
 
 def merge_preprocess_dict(
-        base: Union[PreprocessCfg, Dict],
-        overlay: Dict,
+    base: Union[PreprocessCfg, Dict],
+    overlay: Dict,
 ):
-    """ Merge overlay key-value pairs on top of base preprocess cfg or dict.
+    """Merge overlay key-value pairs on top of base preprocess cfg or dict.
     Input dicts are filtered based on PreprocessCfg fields.
     """
     if isinstance(base, PreprocessCfg):
@@ -49,7 +64,9 @@ def merge_preprocess_dict(
     else:
         base_clean = {k: v for k, v in base.items() if k in _PREPROCESS_KEYS}
     if overlay:
-        overlay_clean = {k: v for k, v in overlay.items() if k in _PREPROCESS_KEYS and v is not None}
+        overlay_clean = {
+            k: v for k, v in overlay.items() if k in _PREPROCESS_KEYS and v is not None
+        }
         base_clean.update(overlay_clean)
     return base_clean
 
@@ -62,7 +79,9 @@ def merge_preprocess_kwargs(base: PreprocessCfg, **kwargs):
 class AugmentationCfg:
     scale: Tuple[float, float] = (0.9, 1.0)
     ratio: Optional[Tuple[float, float]] = None
-    color_jitter: Optional[Union[float, Tuple[float, float, float], Tuple[float, float, float, float]]] = None
+    color_jitter: Optional[
+        Union[float, Tuple[float, float, float], Tuple[float, float, float, float]]
+    ] = None
     re_prob: Optional[float] = None
     re_count: Optional[int] = None
     use_timm: bool = False
@@ -70,6 +89,12 @@ class AugmentationCfg:
     # params for simclr_jitter_gray
     color_jitter_prob: float = None
     gray_scale_prob: float = None
+
+    # new custom params
+    random_perspective: bool = False
+    random_autocontrast_prob: Optional[float] = None
+    random_equalize_prob: Optional[float] = None
+    random_sharpness_prob: Optional[float] = None
 
 
 def _setup_size(size, error_msg):
@@ -86,20 +111,20 @@ def _setup_size(size, error_msg):
 
 
 class ResizeKeepRatio:
-    """ Resize and Keep Ratio
+    """Resize and Keep Ratio
 
     Copy & paste from `timm`
     """
 
     def __init__(
-            self,
-            size,
-            longest=0.,
-            interpolation=InterpolationMode.BICUBIC,
-            random_scale_prob=0.,
-            random_scale_range=(0.85, 1.05),
-            random_aspect_prob=0.,
-            random_aspect_range=(0.9, 1.11)
+        self,
+        size,
+        longest=0.0,
+        interpolation=InterpolationMode.BICUBIC,
+        random_scale_prob=0.0,
+        random_scale_range=(0.85, 1.05),
+        random_aspect_prob=0.0,
+        random_aspect_range=(0.9, 1.11),
     ):
         if isinstance(size, (list, tuple)):
             self.size = tuple(size)
@@ -114,30 +139,36 @@ class ResizeKeepRatio:
 
     @staticmethod
     def get_params(
-            img,
-            target_size,
-            longest,
-            random_scale_prob=0.,
-            random_scale_range=(0.85, 1.05),
-            random_aspect_prob=0.,
-            random_aspect_range=(0.9, 1.11)
+        img,
+        target_size,
+        longest,
+        random_scale_prob=0.0,
+        random_scale_range=(0.85, 1.05),
+        random_aspect_prob=0.0,
+        random_aspect_range=(0.9, 1.11),
     ):
-        """Get parameters
-        """
+        """Get parameters"""
         source_size = img.size[::-1]  # h, w
         h, w = source_size
         target_h, target_w = target_size
         ratio_h = h / target_h
         ratio_w = w / target_w
-        ratio = max(ratio_h, ratio_w) * longest + min(ratio_h, ratio_w) * (1. - longest)
+        ratio = max(ratio_h, ratio_w) * longest + min(ratio_h, ratio_w) * (
+            1.0 - longest
+        )
         if random_scale_prob > 0 and random.random() < random_scale_prob:
             ratio_factor = random.uniform(random_scale_range[0], random_scale_range[1])
             ratio_factor = (ratio_factor, ratio_factor)
         else:
-            ratio_factor = (1., 1.)
+            ratio_factor = (1.0, 1.0)
         if random_aspect_prob > 0 and random.random() < random_aspect_prob:
-            aspect_factor = random.uniform(random_aspect_range[0], random_aspect_range[1])
-            ratio_factor = (ratio_factor[0] / aspect_factor, ratio_factor[1] * aspect_factor)
+            aspect_factor = random.uniform(
+                random_aspect_range[0], random_aspect_range[1]
+            )
+            ratio_factor = (
+                ratio_factor[0] / aspect_factor,
+                ratio_factor[1] * aspect_factor,
+            )
         size = [round(x * f / ratio) for x, f in zip(source_size, ratio_factor)]
         return size
 
@@ -150,21 +181,27 @@ class ResizeKeepRatio:
             PIL Image: Resized, padded to at least target size, possibly cropped to exactly target size
         """
         size = self.get_params(
-            img, self.size, self.longest,
-            self.random_scale_prob, self.random_scale_range,
-            self.random_aspect_prob, self.random_aspect_range
+            img,
+            self.size,
+            self.longest,
+            self.random_scale_prob,
+            self.random_scale_range,
+            self.random_aspect_prob,
+            self.random_aspect_range,
         )
         img = F.resize(img, size, self.interpolation)
         return img
 
     def __repr__(self):
-        format_string = self.__class__.__name__ + '(size={0}'.format(self.size)
-        format_string += f', interpolation={self.interpolation})'
-        format_string += f', longest={self.longest:.3f})'
+        format_string = self.__class__.__name__ + "(size={0}".format(self.size)
+        format_string += f", interpolation={self.interpolation})"
+        format_string += f", longest={self.longest:.3f})"
         return format_string
 
 
-def center_crop_or_pad(img: torch.Tensor, output_size: List[int], fill=0) -> torch.Tensor:
+def center_crop_or_pad(
+    img: torch.Tensor, output_size: List[int], fill=0
+) -> torch.Tensor:
     """Center crops and/or pads the given image.
     If the image is torch Tensor, it is expected
     to have [..., H, W] shape, where ... means an arbitrary number of leading dimensions.
@@ -218,7 +255,9 @@ class CenterCropOrPad(torch.nn.Module):
 
     def __init__(self, size, fill=0):
         super().__init__()
-        self.size = _setup_size(size, error_msg="Please provide only two dimensions (h, w) for size.")
+        self.size = _setup_size(
+            size, error_msg="Please provide only two dimensions (h, w) for size."
+        )
         self.fill = fill
 
     def forward(self, img):
@@ -236,17 +275,20 @@ class CenterCropOrPad(torch.nn.Module):
 
 
 def _convert_to_rgb(image):
-    return image.convert('RGB')
+    return image.convert("RGB")
 
 
 class color_jitter(object):
     """
     Apply Color Jitter to the PIL image with a specified probability.
     """
-    def __init__(self, brightness=0., contrast=0., saturation=0., hue=0., p=0.8):
-        assert 0. <= p <= 1.
+
+    def __init__(self, brightness=0.0, contrast=0.0, saturation=0.0, hue=0.0, p=0.8):
+        assert 0.0 <= p <= 1.0
         self.p = p
-        self.transf = ColorJitter(brightness=brightness, contrast=contrast, saturation=saturation, hue=hue)
+        self.transf = ColorJitter(
+            brightness=brightness, contrast=contrast, saturation=saturation, hue=hue
+        )
 
     def __call__(self, img):
         if random.random() < self.p:
@@ -259,8 +301,9 @@ class gray_scale(object):
     """
     Apply Gray Scale to the PIL image with a specified probability.
     """
+
     def __init__(self, p=0.2):
-        assert 0. <= p <= 1.
+        assert 0.0 <= p <= 1.0
         self.p = p
         self.transf = Grayscale(num_output_channels=3)
 
@@ -272,14 +315,14 @@ class gray_scale(object):
 
 
 def image_transform(
-        image_size: Union[int, Tuple[int, int]],
-        is_train: bool,
-        mean: Optional[Tuple[float, ...]] = None,
-        std: Optional[Tuple[float, ...]] = None,
-        resize_mode: Optional[str] = None,
-        interpolation: Optional[str] = None,
-        fill_color: int = 0,
-        aug_cfg: Optional[Union[Dict[str, Any], AugmentationCfg]] = None,
+    image_size: Union[int, Tuple[int, int]],
+    is_train: bool,
+    mean: Optional[Tuple[float, ...]] = None,
+    std: Optional[Tuple[float, ...]] = None,
+    resize_mode: Optional[str] = None,
+    interpolation: Optional[str] = None,
+    fill_color: int = 0,
+    aug_cfg: Optional[Union[Dict[str, Any], AugmentationCfg]] = None,
 ):
     mean = mean or OPENAI_DATASET_MEAN
     if not isinstance(mean, (list, tuple)):
@@ -289,13 +332,17 @@ def image_transform(
     if not isinstance(std, (list, tuple)):
         std = (std,) * 3
 
-    interpolation = interpolation or 'bicubic'
-    assert interpolation in ['bicubic', 'bilinear', 'random']
+    interpolation = interpolation or "bicubic"
+    assert interpolation in ["bicubic", "bilinear", "random"]
     # NOTE random is ignored for interpolation_mode, so defaults to BICUBIC for inference if set
-    interpolation_mode = InterpolationMode.BILINEAR if interpolation == 'bilinear' else InterpolationMode.BICUBIC
+    interpolation_mode = (
+        InterpolationMode.BILINEAR
+        if interpolation == "bilinear"
+        else InterpolationMode.BICUBIC
+    )
 
-    resize_mode = resize_mode or 'shortest'
-    assert resize_mode in ('shortest', 'longest', 'squash')
+    resize_mode = resize_mode or "shortest"
+    assert resize_mode in ("shortest", "longest", "squash")
 
     if isinstance(aug_cfg, dict):
         aug_cfg = AugmentationCfg(**aug_cfg)
@@ -306,27 +353,28 @@ def image_transform(
 
     if is_train:
         aug_cfg_dict = {k: v for k, v in asdict(aug_cfg).items() if v is not None}
-        use_timm = aug_cfg_dict.pop('use_timm', False)
+        use_timm = aug_cfg_dict.pop("use_timm", False)
         if use_timm:
             from timm.data import create_transform  # timm can still be optional
+
             if isinstance(image_size, (tuple, list)):
                 assert len(image_size) >= 2
                 input_size = (3,) + image_size[-2:]
             else:
                 input_size = (3, image_size, image_size)
 
-            aug_cfg_dict.setdefault('color_jitter', None)  # disable by default
+            aug_cfg_dict.setdefault("color_jitter", None)  # disable by default
             # drop extra non-timm items
-            aug_cfg_dict.pop('color_jitter_prob', None)
-            aug_cfg_dict.pop('gray_scale_prob', None)
+            aug_cfg_dict.pop("color_jitter_prob", None)
+            aug_cfg_dict.pop("gray_scale_prob", None)
 
             train_transform = create_transform(
                 input_size=input_size,
                 is_training=True,
-                hflip=0.,
+                hflip=0.0,
                 mean=mean,
                 std=std,
-                re_mode='pixel',
+                re_mode="pixel",
                 interpolation=interpolation,
                 **aug_cfg_dict,
             )
@@ -334,66 +382,91 @@ def image_transform(
             train_transform = [
                 RandomResizedCrop(
                     image_size,
-                    scale=aug_cfg_dict.pop('scale'),
+                    scale=aug_cfg_dict.pop("scale"),
                     interpolation=InterpolationMode.BICUBIC,
                 ),
+                RandomHorizontalFlip(),
                 _convert_to_rgb,
             ]
             if aug_cfg.color_jitter_prob:
-                assert aug_cfg.color_jitter is not None and len(aug_cfg.color_jitter) == 4
-                train_transform.extend([
-                    color_jitter(*aug_cfg.color_jitter, p=aug_cfg.color_jitter_prob)
-                ])
+                assert (
+                    aug_cfg.color_jitter is not None and len(aug_cfg.color_jitter) == 4
+                )
+                train_transform.extend(
+                    [color_jitter(*aug_cfg.color_jitter, p=aug_cfg.color_jitter_prob)]
+                )
+                if aug_cfg.random_perspective:
+                    train_transform.append(
+                        RandomPerspective(distortion_scale=0.2, p=0.2)
+                    )
+                if aug_cfg.random_autocontrast_prob is not None:
+                    train_transform.append(
+                        RandomAutocontrast(p=aug_cfg.random_autocontrast_prob)
+                    )
+                if aug_cfg.random_equalize_prob is not None:
+                    train_transform.append(
+                        RandomEqualize(p=aug_cfg.random_equalize_prob)
+                    )
+                if aug_cfg.random_sharpness_prob is not None:
+                    train_transform.append(
+                        RandomAdjustSharpness(
+                            sharpness_factor=2, p=aug_cfg.random_sharpness_prob
+                        )
+                    )
             if aug_cfg.gray_scale_prob:
-                train_transform.extend([
-                    gray_scale(aug_cfg.gray_scale_prob)
-                ])
-            train_transform.extend([
-                ToTensor(),
-                normalize,
-            ])
+                train_transform.extend([gray_scale(aug_cfg.gray_scale_prob)])
+            train_transform.extend(
+                [
+                    ToTensor(),
+                    normalize,
+                ]
+            )
             train_transform = Compose(train_transform)
             if aug_cfg_dict:
-                warnings.warn(f'Unused augmentation cfg items, specify `use_timm` to use ({list(aug_cfg_dict.keys())}).')
+                warnings.warn(
+                    f"Unused augmentation cfg items, specify `use_timm` to use ({list(aug_cfg_dict.keys())})."
+                )
         return train_transform
     else:
-        if resize_mode == 'longest':
+        if resize_mode == "longest":
             transforms = [
-                ResizeKeepRatio(image_size, interpolation=interpolation_mode, longest=1),
-                CenterCropOrPad(image_size, fill=fill_color)
+                ResizeKeepRatio(
+                    image_size, interpolation=interpolation_mode, longest=1
+                ),
+                CenterCropOrPad(image_size, fill=fill_color),
             ]
-        elif resize_mode == 'squash':
+        elif resize_mode == "squash":
             if isinstance(image_size, int):
                 image_size = (image_size, image_size)
             transforms = [
                 Resize(image_size, interpolation=interpolation_mode),
             ]
         else:
-            assert resize_mode == 'shortest'
+            assert resize_mode == "shortest"
             if not isinstance(image_size, (tuple, list)):
                 image_size = (image_size, image_size)
             if image_size[0] == image_size[1]:
                 # simple case, use torchvision built-in Resize w/ shortest edge mode (scalar size arg)
-                transforms = [
-                    Resize(image_size[0], interpolation=interpolation_mode)
-                ]
+                transforms = [Resize(image_size[0], interpolation=interpolation_mode)]
             else:
                 # resize shortest edge to matching target dim for non-square target
                 transforms = [ResizeKeepRatio(image_size)]
             transforms += [CenterCrop(image_size)]
 
-        transforms.extend([
-            _convert_to_rgb,
-            ToTensor(),
-            normalize,
-        ])
+        transforms.extend(
+            [
+                _convert_to_rgb,
+                ToTensor(),
+                normalize,
+            ]
+        )
         return Compose(transforms)
 
 
 def image_transform_v2(
-        cfg: PreprocessCfg,
-        is_train: bool,
-        aug_cfg: Optional[Union[Dict[str, Any], AugmentationCfg]] = None,
+    cfg: PreprocessCfg,
+    is_train: bool,
+    aug_cfg: Optional[Union[Dict[str, Any], AugmentationCfg]] = None,
 ):
     return image_transform(
         image_size=cfg.size,
