@@ -596,7 +596,7 @@ def culture_knn_eval(task, data, epoch, args):
         image_features=image_features,
         cultures=all_cultures,
         k=getattr(args, 'culture_knn_k', 5),
-        query_batch_size=getattr(args, 'culture_knn_query_batch_size', 1024),
+        query_batch_size=getattr(args, 'culture_knn_query_batch_size', 0),
         device=knn_device,
         use_tqdm=True,
     )
