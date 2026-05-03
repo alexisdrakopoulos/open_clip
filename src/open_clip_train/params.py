@@ -237,8 +237,8 @@ def parse_args(args):
     parser.add_argument(
         "--culture-knn-query-batch-size",
         type=int,
-        default=1024,
-        help="Query chunk size for exact culture KNN similarity search.",
+        default=0,
+        help="Query chunk size for exact culture KNN similarity search. Use 0 for automatic full-matrix or memory-safe chunking.",
     )
     parser.add_argument(
         "--culture-knn-include-unknown",

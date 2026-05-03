@@ -344,7 +344,46 @@ def _knn_device(args):
     return device
 
 
-def get_culture_knn_metrics(image_features, cultures, k=5, query_batch_size=1024, device=None):
+def _knn_full_matrix_max_bytes(device):
+    if device.type == "cuda":
+        try:
+            free_bytes, _ = torch.cuda.mem_get_info(device)
+            return int(free_bytes * 0.6)
+        except RuntimeError:
+            return 4 * 1024 ** 3
+    if device.type == "mps":
+        return 2 * 1024 ** 3
+    return 4 * 1024 ** 3
+
+
+def _knn_similarity_matrix_bytes(num_queries, num_references):
+    return num_queries * num_references * 4
+
+
+def _auto_knn_query_batch_size(num_samples, device):
+    max_bytes = max(256 * 1024 ** 2, _knn_full_matrix_max_bytes(device) // 2)
+    return max(1, min(num_samples, max_bytes // max(1, num_samples * 4)))
+
+
+def _culture_knn_counts(neighbor_labels, target_labels):
+    target_labels = target_labels.unsqueeze(1)
+    matches = neighbor_labels.eq(target_labels)
+    majority_labels = torch.mode(neighbor_labels, dim=1).values
+    return (
+        matches[:, 0].float().sum().item(),
+        matches.float().mean(dim=1).sum().item(),
+        majority_labels.eq(target_labels.squeeze(1)).float().sum().item(),
+    )
+
+
+def get_culture_knn_metrics(
+        image_features,
+        cultures,
+        k=5,
+        query_batch_size=0,
+        device=None,
+        use_tqdm=False,
+):
     num_samples = image_features.shape[0]
     class_counts = Counter(cultures)
     metrics = {
@@ -355,7 +394,6 @@ def get_culture_knn_metrics(image_features, cultures, k=5, query_batch_size=1024
         return metrics
 
     effective_k = min(max(1, int(k)), num_samples - 1)
-    query_batch_size = max(1, int(query_batch_size))
     majority_baseline = max(class_counts.values()) / num_samples
 
     label_to_index = {label: index for index, label in enumerate(class_counts.keys())}
@@ -371,22 +409,61 @@ def get_culture_knn_metrics(image_features, cultures, k=5, query_batch_size=1024
     top1_correct = 0.0
     same_at_k_sum = 0.0
     majority_correct = 0.0
-    for start in range(0, num_samples, query_batch_size):
-        end = min(start + query_batch_size, num_samples)
-        similarities = image_features[start:end] @ reference_features
-        row_index = torch.arange(end - start, device=device)
-        col_index = torch.arange(start, end, device=device)
-        similarities[row_index, col_index] = -float("inf")
-
+    full_matrix_bytes = _knn_similarity_matrix_bytes(num_samples, num_samples)
+    if full_matrix_bytes <= _knn_full_matrix_max_bytes(device):
+        progress = tqdm(
+            total=1,
+            desc="Culture KNN search",
+            unit="matrix",
+            dynamic_ncols=True,
+            disable=not use_tqdm,
+        )
+        similarities = image_features @ reference_features
+        similarities.fill_diagonal_(-float("inf"))
         neighbors = similarities.topk(effective_k, dim=1).indices
+        del similarities
         neighbor_labels = label_indices[neighbors]
-        target_labels = label_indices[start:end].unsqueeze(1)
-        matches = neighbor_labels.eq(target_labels)
+        top1_correct, same_at_k_sum, majority_correct = _culture_knn_counts(
+            neighbor_labels,
+            label_indices,
+        )
+        progress.update(1)
+        progress.close()
+    else:
+        query_batch_size = int(query_batch_size)
+        if query_batch_size <= 0:
+            query_batch_size = _auto_knn_query_batch_size(num_samples, device)
+        query_batch_size = max(1, min(query_batch_size, num_samples))
+        _logger.info(
+            "Culture KNN full matrix would require %.2f GiB; using exact chunked search with query_batch_size=%d.",
+            full_matrix_bytes / (1024 ** 3),
+            query_batch_size,
+        )
+        query_starts = range(0, num_samples, query_batch_size)
+        if use_tqdm:
+            query_starts = tqdm(
+                query_starts,
+                total=math.ceil(num_samples / query_batch_size),
+                desc="Culture KNN search",
+                unit="chunk",
+                dynamic_ncols=True,
+            )
+        for start in query_starts:
+            end = min(start + query_batch_size, num_samples)
+            similarities = image_features[start:end] @ reference_features
+            row_index = torch.arange(end - start, device=device)
+            col_index = torch.arange(start, end, device=device)
+            similarities[row_index, col_index] = -float("inf")
 
-        top1_correct += matches[:, 0].float().sum().item()
-        same_at_k_sum += matches.float().mean(dim=1).sum().item()
-        majority_labels = torch.mode(neighbor_labels, dim=1).values
-        majority_correct += majority_labels.eq(target_labels.squeeze(1)).float().sum().item()
+            neighbors = similarities.topk(effective_k, dim=1).indices
+            neighbor_labels = label_indices[neighbors]
+            batch_top1, batch_same_at_k, batch_majority = _culture_knn_counts(
+                neighbor_labels,
+                label_indices[start:end],
+            )
+            top1_correct += batch_top1
+            same_at_k_sum += batch_same_at_k
+            majority_correct += batch_majority
 
     metrics.update({
         "culture_knn_k": effective_k,
@@ -421,15 +498,24 @@ def culture_knn_eval(task, data, epoch, args):
     )
     input_dtype = get_input_dtype(args.precision)
     model = get_model_from_task(task)
+    knn_device = _knn_device(args)
     max_samples = max(0, getattr(args, 'culture_knn_max_samples', 0))
 
     all_image_features, all_cultures = [], []
     num_samples = 0
+    progress = None
     if is_rank0:
         dataloader = data['culture-knn'].dataloader
         dataloader_iter = iter(dataloader)
         split = getattr(data['culture-knn'], 'split', 'dataset')
         _logger.info(f"Starting culture KNN eval on {split} data.")
+        num_batches = getattr(dataloader, 'num_batches', None) or None
+        progress = tqdm(
+            total=num_batches,
+            desc=f"Culture KNN embeddings ({split})",
+            unit="batch",
+            dynamic_ncols=True,
+        )
 
     if use_fsdp_eval:
         image_size = model.visual.image_size
@@ -447,6 +533,8 @@ def culture_knn_eval(task, data, epoch, args):
                         batch = None
                     else:
                         batch = next(dataloader_iter, None)
+                    if batch is not None and progress is not None:
+                        progress.update(1)
                     signal.fill_(0 if batch is None else 1)
                 dist.broadcast(signal, src=0)
                 if signal.item() == 0:
@@ -466,6 +554,8 @@ def culture_knn_eval(task, data, epoch, args):
                 batch = next(dataloader_iter, None)
                 if batch is None:
                     break
+                if progress is not None:
+                    progress.update(1)
                 remaining = max_samples - num_samples if max_samples else None
                 if remaining is not None and remaining <= 0:
                     break
@@ -481,12 +571,18 @@ def culture_knn_eval(task, data, epoch, args):
             if is_rank0 and batch_cultures:
                 image_features = _extract_image_features(model_out)[:len(batch_cultures)]
                 image_features = F.normalize(image_features.float(), dim=-1)
-                all_image_features.append(image_features.cpu())
+                image_features = image_features.to(device=knn_device, non_blocking=True)
+                all_image_features.append(image_features)
                 all_cultures.extend(batch_cultures)
                 num_samples += len(batch_cultures)
+                if progress is not None:
+                    progress.set_postfix(samples=num_samples, refresh=False)
                 if (i % 100) == 0:
                     _logger.info(f"Culture KNN Eval Epoch: {epoch} [{num_samples} samples]")
             i += 1
+
+    if progress is not None:
+        progress.close()
 
     if not is_rank0:
         return {}
@@ -501,7 +597,8 @@ def culture_knn_eval(task, data, epoch, args):
         cultures=all_cultures,
         k=getattr(args, 'culture_knn_k', 5),
         query_batch_size=getattr(args, 'culture_knn_query_batch_size', 1024),
-        device=_knn_device(args),
+        device=knn_device,
+        use_tqdm=True,
     )
     _logger.info('Finished culture KNN eval.')
     return metrics
