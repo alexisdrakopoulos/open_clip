@@ -266,7 +266,8 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
             # resetting batch / data time meters per log window
             batch_time_m.reset()
             data_time_m.reset()
-            progress.close()
+    if is_master_rank:
+        progress.close()
     # end for
 
 
@@ -365,14 +366,54 @@ def _auto_knn_query_batch_size(num_samples, device):
     return max(1, min(num_samples, max_bytes // max(1, num_samples * 4)))
 
 
-def _culture_knn_counts(neighbor_labels, target_labels):
+def _culture_knn_batch_stats(neighbor_labels, target_labels, num_classes):
     target_labels = target_labels.unsqueeze(1)
     matches = neighbor_labels.eq(target_labels)
     majority_labels = torch.mode(neighbor_labels, dim=1).values
+    flat_target_labels = target_labels.squeeze(1)
+    majority_labels_cpu = majority_labels.cpu()
+    flat_target_labels_cpu = flat_target_labels.cpu()
+    correct_cpu = majority_labels_cpu.eq(flat_target_labels_cpu)
+    true_positive_counts = torch.bincount(
+        flat_target_labels_cpu[correct_cpu],
+        minlength=num_classes,
+    )
+    predicted_counts = torch.bincount(majority_labels_cpu, minlength=num_classes)
+    target_counts = torch.bincount(flat_target_labels_cpu, minlength=num_classes)
     return (
         matches[:, 0].float().sum().item(),
         matches.float().mean(dim=1).sum().item(),
-        majority_labels.eq(target_labels.squeeze(1)).float().sum().item(),
+        majority_labels.eq(flat_target_labels).float().sum().item(),
+        true_positive_counts,
+        predicted_counts,
+        target_counts,
+    )
+
+
+def _culture_knn_f1_metrics(true_positive_counts, predicted_counts, target_counts):
+    true_positive_counts = true_positive_counts.float()
+    predicted_counts = predicted_counts.float()
+    target_counts = target_counts.float()
+
+    precision = torch.zeros_like(true_positive_counts)
+    recall = torch.zeros_like(true_positive_counts)
+    precision_mask = predicted_counts > 0
+    recall_mask = target_counts > 0
+    precision[precision_mask] = true_positive_counts[precision_mask] / predicted_counts[precision_mask]
+    recall[recall_mask] = true_positive_counts[recall_mask] / target_counts[recall_mask]
+
+    f1 = torch.zeros_like(true_positive_counts)
+    f1_mask = (precision + recall) > 0
+    f1[f1_mask] = 2 * precision[f1_mask] * recall[f1_mask] / (precision[f1_mask] + recall[f1_mask])
+
+    support = target_counts.sum().item()
+    if support == 0:
+        return 0.0, 0.0, 0.0
+
+    return (
+        f1[recall_mask].mean().item() if recall_mask.any() else 0.0,
+        (f1 * target_counts).sum().item() / support,
+        recall[recall_mask].mean().item() if recall_mask.any() else 0.0,
     )
 
 
@@ -409,6 +450,10 @@ def get_culture_knn_metrics(
     top1_correct = 0.0
     same_at_k_sum = 0.0
     majority_correct = 0.0
+    num_classes = len(class_counts)
+    true_positive_counts = torch.zeros(num_classes, dtype=torch.long)
+    predicted_counts = torch.zeros(num_classes, dtype=torch.long)
+    target_counts = torch.zeros(num_classes, dtype=torch.long)
     full_matrix_bytes = _knn_similarity_matrix_bytes(num_samples, num_samples)
     if full_matrix_bytes <= _knn_full_matrix_max_bytes(device):
         progress = tqdm(
@@ -423,9 +468,17 @@ def get_culture_knn_metrics(
         neighbors = similarities.topk(effective_k, dim=1).indices
         del similarities
         neighbor_labels = label_indices[neighbors]
-        top1_correct, same_at_k_sum, majority_correct = _culture_knn_counts(
+        (
+            top1_correct,
+            same_at_k_sum,
+            majority_correct,
+            true_positive_counts,
+            predicted_counts,
+            target_counts,
+        ) = _culture_knn_batch_stats(
             neighbor_labels,
             label_indices,
+            num_classes,
         )
         progress.update(1)
         progress.close()
@@ -457,19 +510,39 @@ def get_culture_knn_metrics(
 
             neighbors = similarities.topk(effective_k, dim=1).indices
             neighbor_labels = label_indices[neighbors]
-            batch_top1, batch_same_at_k, batch_majority = _culture_knn_counts(
+            (
+                batch_top1,
+                batch_same_at_k,
+                batch_majority,
+                batch_true_positive_counts,
+                batch_predicted_counts,
+                batch_target_counts,
+            ) = _culture_knn_batch_stats(
                 neighbor_labels,
                 label_indices[start:end],
+                num_classes,
             )
             top1_correct += batch_top1
             same_at_k_sum += batch_same_at_k
             majority_correct += batch_majority
+            true_positive_counts += batch_true_positive_counts
+            predicted_counts += batch_predicted_counts
+            target_counts += batch_target_counts
+
+    macro_f1, weighted_f1, balanced_acc = _culture_knn_f1_metrics(
+        true_positive_counts,
+        predicted_counts,
+        target_counts,
+    )
 
     metrics.update({
         "culture_knn_k": effective_k,
         "culture_knn_top1": top1_correct / num_samples,
         f"culture_knn_same@{effective_k}": same_at_k_sum / num_samples,
         f"culture_knn_majority@{effective_k}": majority_correct / num_samples,
+        f"culture_knn_macro_f1@{effective_k}": macro_f1,
+        f"culture_knn_weighted_f1@{effective_k}": weighted_f1,
+        f"culture_knn_balanced_acc@{effective_k}": balanced_acc,
         "culture_knn_majority_baseline": majority_baseline,
     })
     return metrics
