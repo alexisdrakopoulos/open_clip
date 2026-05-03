@@ -181,6 +181,35 @@ def filter_no_caption_or_no_image(sample):
     return has_caption and has_image
 
 
+def decode_text_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    return str(value).strip()
+
+
+def filter_has_culture_and_source(sample):
+    return 'culture' in sample and 'source' in sample
+
+
+class SourceFilter:
+    def __init__(self, sources):
+        self.sources = set(sources)
+
+    def __call__(self, sample):
+        return decode_text_value(sample.get('source')) in self.sources
+
+
+def make_source_filter(sources):
+    if not sources:
+        return None
+    source_set = {decode_text_value(source) for source in sources if decode_text_value(source)}
+    if not source_set:
+        return None
+    return SourceFilter(source_set)
+
+
 def log_and_continue(exn):
     """Call in an exception handler to ignore any exception, issue a warning, and continue."""
     _logger.warning(f'Handling webdataset error ({repr(exn)}). Ignoring.')
@@ -329,10 +358,23 @@ class ResampledShards2(IterableDataset):
                 yield dict(url=self.rng.choices(self.urls, weights=self.weights, k=1)[0])
 
 
-def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokenizer=None):
-    input_shards = args.train_data if is_train else args.val_data
+def get_wds_dataset(
+        args,
+        preprocess_img,
+        is_train,
+        epoch=0,
+        floor=False,
+        tokenizer=None,
+        input_shards=None,
+        include_metadata=False,
+        include_text=True,
+        source_filter=None,
+):
+    input_shards = input_shards or (args.train_data if is_train else args.val_data)
     assert input_shards is not None
     resampled = getattr(args, 'dataset_resampled', False) and is_train
+    source_filter_fn = make_source_filter(source_filter)
+    include_metadata = include_metadata or source_filter_fn is not None
 
     num_shards = None
     if is_train:
@@ -390,11 +432,25 @@ def get_wds_dataset(args, preprocess_img, is_train, epoch=0, floor=False, tokeni
             # at this point, we have an iterator over the shards assigned to each worker
             wds.tarfile_to_samples(handler=log_and_continue),
         ])
+    pipeline.append(wds.select(filter_no_caption_or_no_image))
+    if include_metadata:
+        pipeline.append(wds.select(filter_has_culture_and_source))
+    if source_filter_fn is not None:
+        pipeline.append(wds.select(source_filter_fn))
+
+    rename_kwargs = {"image": "jpg;png;jpeg;webp"}
+    map_kwargs = {"image": preprocess_img}
+    if include_text:
+        rename_kwargs["text"] = "txt"
+        map_kwargs["text"] = lambda text: tokenizer(text)[0]
+    if include_metadata:
+        rename_kwargs.update({"culture": "culture", "source": "source"})
+        map_kwargs.update({"culture": decode_text_value, "source": decode_text_value})
+
     pipeline.extend([
-        wds.select(filter_no_caption_or_no_image),
         wds.decode("pilrgb", handler=log_and_continue),
-        wds.rename(image="jpg;png;jpeg;webp", text="txt", keep=False),
-        wds.map_dict(image=preprocess_img, text=lambda text: tokenizer(text)[0]),
+        wds.rename(**rename_kwargs, keep=False),
+        wds.map_dict(**map_kwargs),
         wds.batched(args.batch_size, partial=not is_train, collation_fn=default_collate),
     ])
 
@@ -546,6 +602,33 @@ def get_dataset_fn(data_path, dataset_type):
         raise ValueError(f"Unsupported dataset type: {dataset_type}")
     
 
+def get_culture_knn_sources(args):
+    sources = []
+    for value in getattr(args, 'culture_knn_sources', None) or []:
+        sources.extend(source.strip() for source in value.split(',') if source.strip())
+
+    sources_file = getattr(args, 'culture_knn_sources_file', None)
+    if sources_file:
+        with open(sources_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                source = line.strip()
+                if source and not source.startswith('#'):
+                    sources.append(source)
+
+    return sources or None
+
+
+def get_culture_knn_data_path(args):
+    split = getattr(args, 'culture_knn_data', 'auto')
+    if split == 'val':
+        return args.val_data, 'val'
+    if split == 'train':
+        return args.train_data, 'train'
+    if args.val_data:
+        return args.val_data, 'val'
+    return args.train_data, 'train'
+
+
 def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
     preprocess_train, preprocess_val = preprocess_fns
     data = {}
@@ -557,6 +640,28 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
     if args.val_data:
         data["val"] = get_dataset_fn(args.val_data, args.dataset_type)(
             args, preprocess_val, is_train=False, tokenizer=tokenizer)
+
+    if getattr(args, 'culture_knn', False):
+        culture_knn_path, culture_knn_split = get_culture_knn_data_path(args)
+        if not culture_knn_path:
+            _logger.warning('Skipping culture KNN eval because no matching train/val WebDataset path was provided.')
+        else:
+            culture_knn_dataset_fn = get_dataset_fn(culture_knn_path, args.dataset_type)
+            if culture_knn_dataset_fn is not get_wds_dataset:
+                _logger.warning('Skipping culture KNN eval because it currently supports WebDataset tar shards only.')
+            else:
+                data["culture-knn"] = get_wds_dataset(
+                    args,
+                    preprocess_val,
+                    is_train=False,
+                    epoch=epoch,
+                    tokenizer=tokenizer,
+                    input_shards=culture_knn_path,
+                    include_metadata=True,
+                    include_text=False,
+                    source_filter=get_culture_knn_sources(args),
+                )
+                data["culture-knn"].split = culture_knn_split
 
     if args.imagenet_val is not None:
         data["imagenet-val"] = get_imagenet(args, preprocess_fns, "val")

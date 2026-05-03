@@ -192,6 +192,61 @@ def parse_args(args):
         "--val-frequency", type=int, default=1, help="How often to run evaluation with val data."
     )
     parser.add_argument(
+        "--culture-knn",
+        default=False,
+        action="store_true",
+        help="Run leave-one-out KNN culture-label evaluation on WebDataset samples with .culture and .source members.",
+    )
+    parser.add_argument(
+        "--culture-knn-data",
+        type=str,
+        choices=["auto", "train", "val"],
+        default="auto",
+        help="Dataset split to use for culture KNN eval. Auto prefers val data and falls back to train data.",
+    )
+    parser.add_argument(
+        "--culture-knn-sources",
+        nargs="*",
+        default=None,
+        help="Optional source labels to include for culture KNN eval. Values may be space-separated or comma-separated.",
+    )
+    parser.add_argument(
+        "--culture-knn-sources-file",
+        type=str,
+        default=None,
+        help="Optional UTF-8 text file with one source label per line for culture KNN eval.",
+    )
+    parser.add_argument(
+        "--culture-knn-k",
+        type=int,
+        default=5,
+        help="Number of nearest neighbors to use for culture KNN eval.",
+    )
+    parser.add_argument(
+        "--culture-knn-frequency",
+        type=int,
+        default=1,
+        help="How often to run culture KNN eval. It always runs at epoch 0 when enabled.",
+    )
+    parser.add_argument(
+        "--culture-knn-max-samples",
+        type=int,
+        default=0,
+        help="Maximum filtered samples to embed for culture KNN eval. Use 0 for no cap.",
+    )
+    parser.add_argument(
+        "--culture-knn-query-batch-size",
+        type=int,
+        default=1024,
+        help="Query chunk size for exact culture KNN similarity search.",
+    )
+    parser.add_argument(
+        "--culture-knn-include-unknown",
+        default=False,
+        action="store_true",
+        help="Include culture labels equal to UNKNOWN in culture KNN eval.",
+    )
+    parser.add_argument(
         "--resume",
         default=None,
         type=str,

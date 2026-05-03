@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+from collections import Counter
 
 _logger = logging.getLogger(__name__)
 import os
@@ -12,6 +13,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parallel.distributed import DistributedDataParallel
+from tqdm import tqdm
 
 try:
     import wandb
@@ -82,6 +84,14 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     end = time.time()
+    is_master_rank = is_master(args)
+    progress = tqdm(
+        total=num_batches_per_epoch,
+        desc=f"Train Epoch: {epoch}",
+        unit="batch",
+        dynamic_ncols=True,
+        disable=not is_master_rank,
+    )
     for i, batch in enumerate(dataloader):
         i_accum = i // args.accum_freq
         step = num_batches_per_epoch * epoch + i_accum
@@ -196,7 +206,10 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
         batch_time_m.update(time.time() - end)
         end = time.time()
         batch_count = i_accum + 1
-        if is_master(args) and (i_accum % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
+        if is_master_rank:
+            progress.update(1)
+
+        if is_master_rank and (i_accum % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
             batch_size = len(batch["image"])
             num_samples = batch_count * batch_size * args.accum_freq * args.world_size
             samples_per_epoch = dataloader.num_samples
@@ -218,12 +231,14 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
             )
             samples_per_second = args.accum_freq * args.batch_size * args.world_size / batch_time_m.val
             samples_per_second_per_gpu = args.accum_freq * args.batch_size / batch_time_m.val
-            _logger.info(
-                f"Train Epoch: {epoch} [{num_samples:>{sample_digits}}/{samples_per_epoch} ({percent_complete:.0f}%)] "
-                f"Data (t): {data_time_m.avg:.3f} "
-                f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
-                f"LR: {optimizer.param_groups[0]['lr']:5f} "
-                f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
+            progress.set_postfix_str(
+                f"samples {num_samples:>{sample_digits}}/{samples_per_epoch} ({percent_complete:.0f}%), "
+                f"data {data_time_m.avg:.3f}s, "
+                f"batch {batch_time_m.avg:.3f}s, "
+                f"{samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu, "
+                f"lr {optimizer.param_groups[0]['lr']:5f}, "
+                f"scale {logit_scale_scalar:.3f}, " + loss_log,
+                refresh=True,
             )
 
             # Save train loss / etc. Using non avg meter values as loggers have their own smoothing
@@ -251,7 +266,245 @@ def train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_wr
             # resetting batch / data time meters per log window
             batch_time_m.reset()
             data_time_m.reset()
+            progress.close()
     # end for
+
+
+def _metadata_to_list(values):
+    if values is None:
+        return []
+    if isinstance(values, torch.Tensor):
+        return values.detach().cpu().tolist()
+    if isinstance(values, np.ndarray):
+        return values.tolist()
+    if isinstance(values, (list, tuple)):
+        return list(values)
+    return [values]
+
+
+def _metadata_to_string(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    return str(value).strip()
+
+
+def _index_batch_value(value, indices):
+    if isinstance(value, torch.Tensor):
+        index = torch.as_tensor(indices, device=value.device, dtype=torch.long)
+        return value.index_select(0, index)
+    if isinstance(value, dict):
+        return {key: _index_batch_value(val, indices) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [value[index] for index in indices]
+    return value
+
+
+def _select_culture_knn_batch(batch, args, limit=None):
+    cultures = [_metadata_to_string(value) for value in _metadata_to_list(batch.get("culture"))]
+    if not cultures:
+        return None, []
+
+    include_unknown = getattr(args, 'culture_knn_include_unknown', False)
+    selected_indices, selected_cultures = [], []
+    for index, culture in enumerate(cultures):
+        if not culture:
+            continue
+        if not include_unknown and culture.upper() == "UNKNOWN":
+            continue
+        selected_indices.append(index)
+        selected_cultures.append(culture)
+
+    if limit is not None:
+        selected_indices = selected_indices[:limit]
+        selected_cultures = selected_cultures[:limit]
+
+    if not selected_cultures:
+        return None, []
+
+    return {
+        key: _index_batch_value(value, selected_indices)
+        for key, value in batch.items()
+    }, selected_cultures
+
+
+def _extract_image_features(model_out):
+    if isinstance(model_out, dict):
+        return model_out["image_features"]
+    return model_out[0]
+
+
+def _knn_device(args):
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        return torch.device("cpu")
+    if device.type == "mps" and not torch.backends.mps.is_available():
+        return torch.device("cpu")
+    return device
+
+
+def get_culture_knn_metrics(image_features, cultures, k=5, query_batch_size=1024, device=None):
+    num_samples = image_features.shape[0]
+    class_counts = Counter(cultures)
+    metrics = {
+        "culture_knn_samples": num_samples,
+        "culture_knn_classes": len(class_counts),
+    }
+    if num_samples < 2 or not class_counts:
+        return metrics
+
+    effective_k = min(max(1, int(k)), num_samples - 1)
+    query_batch_size = max(1, int(query_batch_size))
+    majority_baseline = max(class_counts.values()) / num_samples
+
+    label_to_index = {label: index for index, label in enumerate(class_counts.keys())}
+    label_indices = torch.tensor([label_to_index[label] for label in cultures], dtype=torch.long)
+
+    image_features = F.normalize(image_features.float(), dim=-1)
+    if device is None:
+        device = torch.device("cpu")
+    image_features = image_features.to(device=device, non_blocking=True)
+    label_indices = label_indices.to(device=device, non_blocking=True)
+    reference_features = image_features.t()
+
+    top1_correct = 0.0
+    same_at_k_sum = 0.0
+    majority_correct = 0.0
+    for start in range(0, num_samples, query_batch_size):
+        end = min(start + query_batch_size, num_samples)
+        similarities = image_features[start:end] @ reference_features
+        row_index = torch.arange(end - start, device=device)
+        col_index = torch.arange(start, end, device=device)
+        similarities[row_index, col_index] = -float("inf")
+
+        neighbors = similarities.topk(effective_k, dim=1).indices
+        neighbor_labels = label_indices[neighbors]
+        target_labels = label_indices[start:end].unsqueeze(1)
+        matches = neighbor_labels.eq(target_labels)
+
+        top1_correct += matches[:, 0].float().sum().item()
+        same_at_k_sum += matches.float().mean(dim=1).sum().item()
+        majority_labels = torch.mode(neighbor_labels, dim=1).values
+        majority_correct += majority_labels.eq(target_labels.squeeze(1)).float().sum().item()
+
+    metrics.update({
+        "culture_knn_k": effective_k,
+        "culture_knn_top1": top1_correct / num_samples,
+        f"culture_knn_same@{effective_k}": same_at_k_sum / num_samples,
+        f"culture_knn_majority@{effective_k}": majority_correct / num_samples,
+        "culture_knn_majority_baseline": majority_baseline,
+    })
+    return metrics
+
+
+def culture_knn_eval(task, data, epoch, args):
+    if not getattr(args, 'culture_knn', False) or 'culture-knn' not in data:
+        return {}
+
+    frequency = getattr(args, 'culture_knn_frequency', 1)
+    if frequency == 0:
+        return {}
+    if epoch != 0 and epoch != args.epochs and (epoch % frequency) != 0:
+        return {}
+
+    use_fsdp_eval = getattr(args, 'fsdp', False) and getattr(args, 'distributed', False)
+    is_rank0 = is_master(args)
+    if not use_fsdp_eval and not is_rank0:
+        return {}
+
+    device = torch.device(args.device)
+    autocast = get_autocast(
+        args.precision,
+        device_type=device.type,
+        fsdp=getattr(args, 'fsdp', False),
+    )
+    input_dtype = get_input_dtype(args.precision)
+    model = get_model_from_task(task)
+    max_samples = max(0, getattr(args, 'culture_knn_max_samples', 0))
+
+    all_image_features, all_cultures = [], []
+    num_samples = 0
+    if is_rank0:
+        dataloader = data['culture-knn'].dataloader
+        dataloader_iter = iter(dataloader)
+        split = getattr(data['culture-knn'], 'split', 'dataset')
+        _logger.info(f"Starting culture KNN eval on {split} data.")
+
+    if use_fsdp_eval:
+        image_size = model.visual.image_size
+        if not isinstance(image_size, tuple):
+            image_size = (image_size, image_size)
+        dummy_images = torch.zeros(1, 3, *image_size, device=device, dtype=input_dtype)
+        signal = torch.zeros(1, device=device, dtype=torch.long)
+
+    with torch.inference_mode():
+        i = 0
+        while True:
+            if use_fsdp_eval:
+                if is_rank0:
+                    if max_samples and num_samples >= max_samples:
+                        batch = None
+                    else:
+                        batch = next(dataloader_iter, None)
+                    signal.fill_(0 if batch is None else 1)
+                dist.broadcast(signal, src=0)
+                if signal.item() == 0:
+                    break
+
+                batch_cultures = []
+                if is_rank0:
+                    remaining = max_samples - num_samples if max_samples else None
+                    batch, batch_cultures = _select_culture_knn_batch(batch, args, limit=remaining)
+                    if batch is not None:
+                        model_batch = task.prepare_batch({"image": batch["image"]}, device, input_dtype)
+                    else:
+                        model_batch = {"image": dummy_images}
+                else:
+                    model_batch = {"image": dummy_images}
+            else:
+                batch = next(dataloader_iter, None)
+                if batch is None:
+                    break
+                remaining = max_samples - num_samples if max_samples else None
+                if remaining is not None and remaining <= 0:
+                    break
+                batch, batch_cultures = _select_culture_knn_batch(batch, args, limit=remaining)
+                if batch is None:
+                    i += 1
+                    continue
+                model_batch = task.prepare_batch({"image": batch["image"]}, device, input_dtype)
+
+            with autocast():
+                model_out = task(model_batch)
+
+            if is_rank0 and batch_cultures:
+                image_features = _extract_image_features(model_out)[:len(batch_cultures)]
+                image_features = F.normalize(image_features.float(), dim=-1)
+                all_image_features.append(image_features.cpu())
+                all_cultures.extend(batch_cultures)
+                num_samples += len(batch_cultures)
+                if (i % 100) == 0:
+                    _logger.info(f"Culture KNN Eval Epoch: {epoch} [{num_samples} samples]")
+            i += 1
+
+    if not is_rank0:
+        return {}
+
+    if not all_image_features:
+        _logger.warning('Culture KNN eval found no samples after source/culture filtering.')
+        return {"culture_knn_samples": 0, "culture_knn_classes": 0}
+
+    image_features = torch.cat(all_image_features)
+    metrics = get_culture_knn_metrics(
+        image_features=image_features,
+        cultures=all_cultures,
+        k=getattr(args, 'culture_knn_k', 5),
+        query_batch_size=getattr(args, 'culture_knn_query_batch_size', 1024),
+        device=_knn_device(args),
+    )
+    _logger.info('Finished culture KNN eval.')
+    return metrics
 
 
 def evaluate(task, data, epoch, args, tb_writer=None, tokenizer=None):
@@ -275,6 +528,10 @@ def evaluate(task, data, epoch, args, tb_writer=None, tokenizer=None):
     zero_shot_metrics = zero_shot_eval(task, data, epoch, args, tokenizer=tokenizer)
     if is_rank0:
         metrics.update(zero_shot_metrics)
+
+    culture_knn_metrics = culture_knn_eval(task, data, epoch, args)
+    if is_rank0:
+        metrics.update(culture_knn_metrics)
 
     autocast = get_autocast(
         args.precision,

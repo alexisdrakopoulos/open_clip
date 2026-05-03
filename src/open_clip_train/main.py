@@ -534,6 +534,8 @@ def main(args):
                 torch._dynamo.config.optimize_ddp = False
             task = torch.compile(task)
 
+    eval_data_keys = ('val', 'imagenet-val', 'imagenet-v2', 'culture-knn')
+
     if 'train' not in data:
         # If using int8, convert to inference mode.
         if args.use_bnb_linear is not None:
@@ -543,6 +545,11 @@ def main(args):
         evaluate(task, data, start_epoch, args, tb_writer=writer, tokenizer=tokenizer)
         return
 
+    if 'culture-knn' in data:
+        evaluate(task, data, start_epoch, args, tb_writer=writer, tokenizer=tokenizer)
+        if args.distributed:
+            torch.distributed.barrier()
+
     for epoch in range(start_epoch, args.epochs):
         if is_master(args):
             _logger.info(f'Start epoch {epoch}')
@@ -550,7 +557,7 @@ def main(args):
         train_one_epoch(task, data, epoch, optimizer, scaler, scheduler, args, tb_writer=writer)
         completed_epoch = epoch + 1
 
-        if any(v in data for v in ('val', 'imagenet-val', 'imagenet-v2')):
+        if any(v in data for v in eval_data_keys):
             evaluate(task, data, completed_epoch, args, tb_writer=writer, tokenizer=tokenizer)
             # sync to avoid some processes advancing/exiting while rank 0 finishes eval
             if args.distributed:
