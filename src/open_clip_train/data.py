@@ -51,6 +51,62 @@ class CsvDataset(Dataset):
         return {"image": image, "text": text}
 
 
+def normalize_object_retrieval_path(path, data_root):
+    path = str(path).strip().replace('\\', '/')
+    if os.path.isabs(path):
+        abs_root = os.path.abspath(data_root).replace(os.sep, '/').rstrip('/')
+        abs_path = os.path.abspath(path).replace(os.sep, '/')
+        root_prefix = abs_root + '/'
+        if abs_path.startswith(root_prefix):
+            return abs_path[len(root_prefix):]
+        return abs_path
+    while path.startswith('./'):
+        path = path[2:]
+    return path
+
+
+def resolve_object_retrieval_path(data_root, path):
+    return path if os.path.isabs(path) else os.path.join(data_root, path)
+
+
+def _load_object_retrieval_json(path, expected_type):
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if not isinstance(data, expected_type):
+        raise ValueError(f"Expected {path} to contain {expected_type.__name__}.")
+    return data
+
+
+def _unique_preserve_order(values):
+    seen = set()
+    unique_values = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique_values.append(value)
+    return unique_values
+
+
+class ObjectRetrievalDataset(Dataset):
+    def __init__(self, data_root, paths, transform):
+        self.data_root = data_root
+        self.paths = list(paths)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, idx):
+        path = self.paths[idx]
+        image_path = resolve_object_retrieval_path(self.data_root, path)
+        with Image.open(image_path) as image:
+            image = image.convert('RGB')
+            if self.transform is not None:
+                image = self.transform(image)
+        return {"image": image, "path": path}
+
+
 class SharedEpoch:
     def __init__(self, epoch: int = 0):
         self.shared_epoch = Value('i', epoch)
@@ -629,6 +685,66 @@ def get_culture_knn_data_path(args):
     return args.train_data, 'train'
 
 
+def get_object_retrieval_dataset(args, preprocess_fn):
+    data_root = getattr(args, 'object_retrieval_root', None)
+    if not data_root:
+        raise ValueError('--object-retrieval-root is required when --object-retrieval is enabled.')
+
+    assets_root = os.path.join(data_root, 'benchmark_assets')
+    all_paths_path = getattr(args, 'object_retrieval_all_paths', None) or os.path.join(assets_root, 'all_paths.json')
+    ground_truth_path = getattr(args, 'object_retrieval_ground_truth', None) or os.path.join(assets_root, 'ground_truth.json')
+
+    all_paths = _load_object_retrieval_json(all_paths_path, list)
+    ground_truth = _load_object_retrieval_json(ground_truth_path, dict)
+
+    paths = _unique_preserve_order(
+        normalize_object_retrieval_path(path, data_root)
+        for path in all_paths
+    )
+    max_images = max(0, int(getattr(args, 'object_retrieval_max_images', 0)))
+    if max_images:
+        paths = paths[:max_images]
+
+    available_paths = set(paths)
+    filtered_ground_truth = {}
+    for query_path, positive_paths in ground_truth.items():
+        query_path = normalize_object_retrieval_path(query_path, data_root)
+        if query_path not in available_paths:
+            continue
+        positives = []
+        for positive_path in positive_paths:
+            positive_path = normalize_object_retrieval_path(positive_path, data_root)
+            if positive_path != query_path and positive_path in available_paths:
+                positives.append(positive_path)
+        positives = _unique_preserve_order(positives)
+        if positives:
+            filtered_ground_truth[query_path] = positives
+
+    if not paths:
+        _logger.warning('Object retrieval eval found no image paths in %s.', all_paths_path)
+    if not filtered_ground_truth:
+        _logger.warning('Object retrieval eval found no usable queries in %s.', ground_truth_path)
+
+    dataset = ObjectRetrievalDataset(data_root, paths, preprocess_fn)
+    batch_size = max(1, int(getattr(args, 'object_retrieval_batch_size', 0) or args.batch_size))
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=args.workers,
+        pin_memory=True,
+        persistent_workers=args.workers > 0,
+    )
+    dataloader.num_samples = len(dataset)
+    dataloader.num_batches = len(dataloader)
+
+    data_info = DataInfo(dataloader=dataloader)
+    data_info.ground_truth = filtered_ground_truth
+    data_info.paths = paths
+    data_info.root = data_root
+    return data_info
+
+
 def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
     preprocess_train, preprocess_val = preprocess_fns
     data = {}
@@ -662,6 +778,9 @@ def get_data(args, preprocess_fns, epoch=0, tokenizer=None):
                     source_filter=get_culture_knn_sources(args),
                 )
                 data["culture-knn"].split = culture_knn_split
+
+    if getattr(args, 'object_retrieval', False):
+        data["object-retrieval"] = get_object_retrieval_dataset(args, preprocess_val)
 
     if args.imagenet_val is not None:
         data["imagenet-val"] = get_imagenet(args, preprocess_fns, "val")

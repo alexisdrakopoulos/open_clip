@@ -548,6 +548,269 @@ def get_culture_knn_metrics(
     return metrics
 
 
+def _parse_object_retrieval_ks(values):
+    if values is None:
+        values = [1, 5, 10, 50, 100]
+    if isinstance(values, (int, str)):
+        values = [values]
+
+    ks = []
+    for value in values:
+        for part in str(value).split(','):
+            part = part.strip()
+            if not part:
+                continue
+            k = int(part)
+            if k > 0:
+                ks.append(k)
+    return sorted(set(ks)) or [1, 5, 10, 50, 100]
+
+
+def _object_retrieval_query_sets(paths, ground_truth):
+    path_to_index = {path: index for index, path in enumerate(paths)}
+    query_indices = []
+    positive_sets = []
+    positive_pairs = 0
+
+    for query_path, positive_paths in ground_truth.items():
+        query_index = path_to_index.get(query_path)
+        if query_index is None:
+            continue
+        positive_indices = {
+            path_to_index[positive_path]
+            for positive_path in positive_paths
+            if positive_path in path_to_index and path_to_index[positive_path] != query_index
+        }
+        if not positive_indices:
+            continue
+        query_indices.append(query_index)
+        positive_sets.append(positive_indices)
+        positive_pairs += len(positive_indices)
+
+    return query_indices, positive_sets, positive_pairs
+
+
+def _update_object_retrieval_hits(neighbors, positive_sets, effective_ks, start, hits):
+    for row_neighbors, positive_indices in zip(neighbors.cpu().tolist(), positive_sets[start:start + neighbors.shape[0]]):
+        first_positive_rank = None
+        for rank, neighbor_index in enumerate(row_neighbors, start=1):
+            if neighbor_index in positive_indices:
+                first_positive_rank = rank
+                break
+        if first_positive_rank is None:
+            continue
+        for index, k in enumerate(effective_ks):
+            if first_positive_rank <= k:
+                hits[index] += 1
+
+
+def get_object_retrieval_metrics(
+        image_features,
+        paths,
+        ground_truth,
+        ks=(1, 5, 10, 50, 100),
+        query_batch_size=0,
+        device=None,
+        use_tqdm=False,
+):
+    num_samples = image_features.shape[0]
+    ks = _parse_object_retrieval_ks(ks)
+    metrics = {
+        "object_retrieval_samples": num_samples,
+        "object_retrieval_queries": 0,
+        "object_retrieval_positive_pairs": 0,
+    }
+    if num_samples < 2 or not paths or not ground_truth:
+        return metrics
+
+    query_indices, positive_sets, positive_pairs = _object_retrieval_query_sets(paths, ground_truth)
+    num_queries = len(query_indices)
+    metrics.update({
+        "object_retrieval_queries": num_queries,
+        "object_retrieval_positive_pairs": positive_pairs,
+    })
+    if num_queries == 0:
+        return metrics
+
+    effective_ks = [min(k, num_samples - 1) for k in ks]
+    max_k = max(effective_ks)
+    if max_k <= 0:
+        return metrics
+
+    image_features = F.normalize(image_features.float(), dim=-1)
+    if device is None:
+        device = torch.device("cpu")
+    image_features = image_features.to(device=device, non_blocking=True)
+    reference_features = image_features.t()
+    query_indices_tensor = torch.tensor(query_indices, dtype=torch.long, device=device)
+    hits = [0 for _ in effective_ks]
+
+    full_matrix_bytes = _knn_similarity_matrix_bytes(num_queries, num_samples)
+    if full_matrix_bytes <= _knn_full_matrix_max_bytes(device):
+        progress = tqdm(
+            total=1,
+            desc="Object retrieval search",
+            unit="matrix",
+            dynamic_ncols=True,
+            disable=not use_tqdm,
+        )
+        similarities = image_features.index_select(0, query_indices_tensor) @ reference_features
+        similarities[torch.arange(num_queries, device=device), query_indices_tensor] = -float("inf")
+        neighbors = similarities.topk(max_k, dim=1).indices
+        del similarities
+        _update_object_retrieval_hits(neighbors, positive_sets, effective_ks, 0, hits)
+        progress.update(1)
+        progress.close()
+    else:
+        query_batch_size = int(query_batch_size)
+        if query_batch_size <= 0:
+            query_batch_size = _auto_knn_query_batch_size(num_samples, device)
+        query_batch_size = max(1, min(query_batch_size, num_queries))
+        _logger.info(
+            "Object retrieval full matrix would require %.2f GiB; using exact chunked search with query_batch_size=%d.",
+            full_matrix_bytes / (1024 ** 3),
+            query_batch_size,
+        )
+        query_starts = range(0, num_queries, query_batch_size)
+        if use_tqdm:
+            query_starts = tqdm(
+                query_starts,
+                total=math.ceil(num_queries / query_batch_size),
+                desc="Object retrieval search",
+                unit="chunk",
+                dynamic_ncols=True,
+            )
+        for start in query_starts:
+            end = min(start + query_batch_size, num_queries)
+            batch_query_indices = query_indices_tensor[start:end]
+            similarities = image_features.index_select(0, batch_query_indices) @ reference_features
+            similarities[torch.arange(end - start, device=device), batch_query_indices] = -float("inf")
+            neighbors = similarities.topk(max_k, dim=1).indices
+            del similarities
+            _update_object_retrieval_hits(neighbors, positive_sets, effective_ks, start, hits)
+
+    for requested_k, hit_count in zip(ks, hits):
+        metrics[f"object_retrieval_recall@{requested_k}"] = hit_count / num_queries
+    return metrics
+
+
+def object_retrieval_eval(task, data, epoch, args):
+    if not getattr(args, 'object_retrieval', False) or 'object-retrieval' not in data:
+        return {}
+
+    frequency = getattr(args, 'object_retrieval_frequency', 1)
+    if frequency == 0:
+        return {}
+    if epoch != 0 and epoch != args.epochs and (epoch % frequency) != 0:
+        return {}
+
+    use_fsdp_eval = getattr(args, 'fsdp', False) and getattr(args, 'distributed', False)
+    is_rank0 = is_master(args)
+    if not use_fsdp_eval and not is_rank0:
+        return {}
+
+    device = torch.device(args.device)
+    autocast = get_autocast(
+        args.precision,
+        device_type=device.type,
+        fsdp=getattr(args, 'fsdp', False),
+    )
+    input_dtype = get_input_dtype(args.precision)
+    model = get_model_from_task(task)
+    retrieval_device = _knn_device(args)
+    data_info = data['object-retrieval']
+    ground_truth = getattr(data_info, 'ground_truth', {})
+
+    all_image_features, all_paths = [], []
+    num_samples = 0
+    progress = None
+    if is_rank0:
+        dataloader = data_info.dataloader
+        dataloader_iter = iter(dataloader)
+        _logger.info("Starting object retrieval eval.")
+        num_batches = getattr(dataloader, 'num_batches', None) or None
+        progress = tqdm(
+            total=num_batches,
+            desc="Object retrieval embeddings",
+            unit="batch",
+            dynamic_ncols=True,
+        )
+
+    if use_fsdp_eval:
+        image_size = model.visual.image_size
+        if not isinstance(image_size, tuple):
+            image_size = (image_size, image_size)
+        dummy_images = torch.zeros(1, 3, *image_size, device=device, dtype=input_dtype)
+        signal = torch.zeros(1, device=device, dtype=torch.long)
+
+    with torch.inference_mode():
+        i = 0
+        while True:
+            if use_fsdp_eval:
+                if is_rank0:
+                    batch = next(dataloader_iter, None)
+                    if batch is not None and progress is not None:
+                        progress.update(1)
+                    signal.fill_(0 if batch is None else 1)
+                dist.broadcast(signal, src=0)
+                if signal.item() == 0:
+                    break
+
+                batch_paths = []
+                if is_rank0:
+                    batch_paths = [_metadata_to_string(value) for value in _metadata_to_list(batch.get("path"))]
+                    model_batch = task.prepare_batch({"image": batch["image"]}, device, input_dtype)
+                else:
+                    model_batch = {"image": dummy_images}
+            else:
+                batch = next(dataloader_iter, None)
+                if batch is None:
+                    break
+                if progress is not None:
+                    progress.update(1)
+                batch_paths = [_metadata_to_string(value) for value in _metadata_to_list(batch.get("path"))]
+                model_batch = task.prepare_batch({"image": batch["image"]}, device, input_dtype)
+
+            with autocast():
+                model_out = task(model_batch)
+
+            if is_rank0 and batch_paths:
+                image_features = _extract_image_features(model_out)[:len(batch_paths)]
+                image_features = F.normalize(image_features.float(), dim=-1)
+                image_features = image_features.to(device=retrieval_device, non_blocking=True)
+                all_image_features.append(image_features)
+                all_paths.extend(batch_paths)
+                num_samples += len(batch_paths)
+                if progress is not None:
+                    progress.set_postfix(samples=num_samples, refresh=False)
+                if (i % 100) == 0:
+                    _logger.info(f"Object Retrieval Eval Epoch: {epoch} [{num_samples} samples]")
+            i += 1
+
+    if progress is not None:
+        progress.close()
+
+    if not is_rank0:
+        return {}
+
+    if not all_image_features:
+        _logger.warning('Object retrieval eval found no samples.')
+        return {"object_retrieval_samples": 0, "object_retrieval_queries": 0, "object_retrieval_positive_pairs": 0}
+
+    image_features = torch.cat(all_image_features)
+    metrics = get_object_retrieval_metrics(
+        image_features=image_features,
+        paths=all_paths,
+        ground_truth=ground_truth,
+        ks=getattr(args, 'object_retrieval_k', [1, 5, 10, 50, 100]),
+        query_batch_size=getattr(args, 'object_retrieval_query_batch_size', 0),
+        device=retrieval_device,
+        use_tqdm=True,
+    )
+    _logger.info('Finished object retrieval eval.')
+    return metrics
+
+
 def culture_knn_eval(task, data, epoch, args):
     if not getattr(args, 'culture_knn', False) or 'culture-knn' not in data:
         return {}
@@ -702,6 +965,10 @@ def evaluate(task, data, epoch, args, tb_writer=None, tokenizer=None):
     culture_knn_metrics = culture_knn_eval(task, data, epoch, args)
     if is_rank0:
         metrics.update(culture_knn_metrics)
+
+    object_retrieval_metrics = object_retrieval_eval(task, data, epoch, args)
+    if is_rank0:
+        metrics.update(object_retrieval_metrics)
 
     autocast = get_autocast(
         args.precision,

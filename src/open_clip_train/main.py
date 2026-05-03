@@ -534,7 +534,7 @@ def main(args):
                 torch._dynamo.config.optimize_ddp = False
             task = torch.compile(task)
 
-    eval_data_keys = ('val', 'imagenet-val', 'imagenet-v2', 'culture-knn')
+    eval_data_keys = ('val', 'imagenet-val', 'imagenet-v2', 'culture-knn', 'object-retrieval')
 
     if 'train' not in data:
         # If using int8, convert to inference mode.
@@ -545,7 +545,7 @@ def main(args):
         evaluate(task, data, start_epoch, args, tb_writer=writer, tokenizer=tokenizer)
         return
 
-    if 'culture-knn' in data:
+    if 'culture-knn' in data or 'object-retrieval' in data:
         evaluate(task, data, start_epoch, args, tb_writer=writer, tokenizer=tokenizer)
         if args.distributed:
             torch.distributed.barrier()

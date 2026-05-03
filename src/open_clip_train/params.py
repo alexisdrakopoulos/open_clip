@@ -247,6 +247,62 @@ def parse_args(args):
         help="Include culture labels equal to UNKNOWN in culture KNN eval.",
     )
     parser.add_argument(
+        "--object-retrieval",
+        "--retrieval-eval",
+        dest="object_retrieval",
+        default=False,
+        action="store_true",
+        help="Run image-to-image object retrieval eval using benchmark_assets/all_paths.json and ground_truth.json.",
+    )
+    parser.add_argument(
+        "--object-retrieval-root",
+        type=str,
+        default="/Volumes/AntiquitiesProjects/clip_eval_set",
+        help="Root directory for object retrieval eval data.",
+    )
+    parser.add_argument(
+        "--object-retrieval-all-paths",
+        type=str,
+        default=None,
+        help="Optional override for object retrieval all_paths.json.",
+    )
+    parser.add_argument(
+        "--object-retrieval-ground-truth",
+        type=str,
+        default=None,
+        help="Optional override for object retrieval ground_truth.json.",
+    )
+    parser.add_argument(
+        "--object-retrieval-k",
+        nargs="*",
+        default=[1, 5, 10, 50, 100],
+        help="Recall@k values for object retrieval eval. Accepts space-separated integers or comma-separated values.",
+    )
+    parser.add_argument(
+        "--object-retrieval-frequency",
+        type=int,
+        default=1,
+        help="How often to run object retrieval eval. It always runs at epoch 0 when enabled.",
+    )
+    parser.add_argument(
+        "--object-retrieval-batch-size",
+        type=int,
+        default=0,
+        help="Batch size for object retrieval image embedding. Use 0 to reuse --batch-size.",
+    )
+    parser.add_argument(
+        "--object-retrieval-query-batch-size",
+        type=int,
+        default=0,
+        help="Query chunk size for exact object retrieval search. Use 0 for automatic full-matrix or memory-safe chunking.",
+    )
+    parser.add_argument(
+        "--object-retrieval-max-images",
+        type=int,
+        default=0,
+        help="Maximum images to embed for object retrieval eval. Use 0 for the full benchmark.",
+    )
+    parser.add_argument(
         "--resume",
         default=None,
         type=str,
