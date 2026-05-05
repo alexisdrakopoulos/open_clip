@@ -245,6 +245,14 @@ def decode_text_value(value):
     return str(value).strip()
 
 
+class TokenizeTextTransform:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def __call__(self, text):
+        return self.tokenizer(text)[0]
+
+
 def filter_has_culture_and_source(sample):
     return 'culture' in sample and 'source' in sample
 
@@ -498,7 +506,7 @@ def get_wds_dataset(
     map_kwargs = {"image": preprocess_img}
     if include_text:
         rename_kwargs["text"] = "txt"
-        map_kwargs["text"] = lambda text: tokenizer(text)[0]
+        map_kwargs["text"] = TokenizeTextTransform(tokenizer)
     if include_metadata:
         rename_kwargs.update({"culture": "culture", "source": "source"})
         map_kwargs.update({"culture": decode_text_value, "source": decode_text_value})
@@ -604,7 +612,7 @@ class SyntheticDataset(Dataset):
         self.image = Image.new('RGB', image_size)
         self.dataset_size = dataset_size
 
-        self.preprocess_txt = lambda text: tokenizer(text)[0]
+        self.preprocess_txt = TokenizeTextTransform(tokenizer)
 
     def __len__(self):
         return self.dataset_size

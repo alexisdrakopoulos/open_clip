@@ -1,4 +1,5 @@
 import os
+import pickle
 import pytest
 import util_test
 import collections
@@ -68,9 +69,15 @@ def build_params(input_shards, seed=0):
     random_seed(seed)
 
     preprocess_img = transforms.ToTensor()
-    tokenizer = lambda x: [x.strip()]
+    tokenizer = strip_tokenizer
 
     return args, preprocess_img, tokenizer
+
+
+def strip_tokenizer(texts):
+    if isinstance(texts, str):
+        texts = [texts]
+    return [text.strip() for text in texts]
 
 
 def get_dataloader(input_shards):
@@ -150,3 +157,12 @@ def test_two_sources_with_upsampling():
             assert count == pytest.approx(TRAIN_NUM_SAMPLES / 20, RTOL), f'{key}, {count}'
         else:
             assert count == pytest.approx(TRAIN_NUM_SAMPLES / 10, RTOL), f'{key}, {count}'
+
+
+def test_wds_pipeline_is_picklable():
+    input_dir = build_inputs('picklable_pipeline')
+    input_shards = os.path.join(input_dir, 'test_data_000.tar')
+    args, preprocess_img, tokenizer = build_params(input_shards)
+    dataset = get_wds_dataset(args, preprocess_img, is_train=True, tokenizer=tokenizer)
+
+    pickle.dumps(dataset.dataloader.dataset)
